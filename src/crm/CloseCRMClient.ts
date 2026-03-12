@@ -1,11 +1,20 @@
 import axios from 'axios';
-import { CRMClient } from './CRMClient';
-import { LeadContext, Disposition } from '../voiceAgent/types';
+
+export type Disposition = 'qualified' | 'not_interested' | 'callback' | 'wrong_number' | 'unknown' | string;
+export interface LeadContext {
+  id: string;
+  fullName?: string;
+  company?: string;
+  phone: string;
+  email?: string;
+  tags: string[];
+  notes?: string;
+}
 
 /**
- * Implementation of the CRMClient interface for Close CRM.
+ * Client for interacting with Close CRM.
  */
-export class CloseCRMClient implements CRMClient {
+export class CloseCRMClient {
   private apiKey: string;
   private baseUrl = 'https://api.close.com/api/v1';
 
