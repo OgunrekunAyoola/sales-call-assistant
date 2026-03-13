@@ -16,26 +16,55 @@ app.get('/health', (req: Request, res: Response) => {
 // ElevenLabs Post-call Webhook
 app.post('/webhooks/elevenlabs/call-finished', async (req: Request, res: Response) => {
   try {
-    const { call_id, phone_number, transcript_summary, disposition } = req.body;
+    const { type, data } = req.body;
 
-    if (!phone_number) {
-      return res.status(400).json({ error: 'Missing phone_number' });
+    // We only care about transcription webhooks for CRM sync
+    if (type !== 'post_call_transcription') {
+      return res.json({ received: true, note: 'ignored_type' });
     }
 
-    // 1. Find lead in Close CRM
-    const lead = await closeClient.getLeadByPhone(phone_number);
+    const { conversation_id, metadata, analysis, call_id } = data;
+
+    // ElevenLabs metadata usually contains the phone number or custom identifiers
+    // If the user uploads a CSV, they can map columns to these metadata keys
+    const phone_number = metadata?.phone_number || metadata?.phone || data?.phone_number;
+    const lead_id_from_metadata = metadata?.lead_id;
+
+    if (!phone_number && !lead_id_from_metadata) {
+      console.warn('Missing identification (phone/lead_id) in ElevenLabs webhook');
+      return res.status(400).json({ error: 'Missing phone_number or lead_id in metadata' });
+    }
+
+    // 1. Find or Use Lead
+    let lead;
+    if (lead_id_from_metadata) {
+      // If we have a direct ID, we could use it, but for safety let's verify or stick to phone-based lookup
+      // since the current client is phone-centric. For now, we'll favor phone lookup if available.
+      lead = { id: lead_id_from_metadata };
+    }
+
+    if (!lead && phone_number) {
+      lead = await closeClient.getLeadByPhone(phone_number);
+    }
+
     if (!lead) {
-      console.warn(`Lead not found for phone number: ${phone_number}`);
+      console.warn(`Lead not found for: ${phone_number || lead_id_from_metadata}`);
       return res.status(404).json({ error: 'Lead not found in CRM' });
     }
 
     // 2. Log Call Activity
-    const summary = transcript_summary || 'No summary provided';
-    const outcome = disposition || 'unknown';
+    // Analysis results usually contains 'summary' and 'data_collection_results' (dispositions)
+    const summary = analysis?.summary || 'No summary provided';
+    
+    // Disposition mapping (ElevenLabs 'data_collection_results' or custom analysis)
+    // For now, looking for a common key or default to 'unknown'
+    const outcome = analysis?.data_collection_results?.outcome || analysis?.transcript_summary || 'unknown';
+    
     await closeClient.logCall({
       leadId: lead.id,
-      disposition: outcome,
+      disposition: String(outcome),
       summary,
+      rawTranscriptUrl: `https://elevenlabs.io/app/conversational-ai/${data.agent_id}/conversations/${conversation_id}`
     });
 
     // 3. Update Lead Status
@@ -46,31 +75,29 @@ app.post('/webhooks/elevenlabs/call-finished', async (req: Request, res: Respons
       'wrong_number': 'Bad Fit'
     };
     
-    const mappedStatus = statusMap[outcome.toLowerCase()];
+    const mappedStatus = statusMap[String(outcome).toLowerCase()];
     if (mappedStatus) {
       await closeClient.updateLeadStatus({ leadId: lead.id, status: mappedStatus });
     }
 
     // 4. Create Follow-up Task for 'callback'
-    if (outcome.toLowerCase() === 'callback') {
-      // Set to tomorrow at noon? Or just leaving without a specific date right now 
-      // Close API accepts specific formats, we'll try a generic +1 day logic or skip if not strict
+    if (String(outcome).toLowerCase() === 'callback') {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
-      const isoDate = tomorrow.toISOString().split('T')[0]; // simple YYYY-MM-DD
+      const isoDate = tomorrow.toISOString().split('T')[0];
       
       await closeClient.createFollowUpTask({
         leadId: lead.id,
         dueAt: isoDate,
         type: 'CALL',
-        note: 'Follow up after AI call'
+        note: `Follow up after AI call (${conversation_id})`
       });
     }
 
-    console.log(`Successfully processed webhook for call ${call_id || 'unknown'} on lead ${lead.id}`);
+    console.log(`Successfully processed ElevenLabs webhook for conversation ${conversation_id} on lead ${lead.id}`);
     res.json({ success: true, lead_id: lead.id });
   } catch (error) {
-    console.error('Error processing webhook:', error);
+    console.error('Error processing ElevenLabs webhook:', error);
     res.status(500).json({ error: 'internal_error' });
   }
 });
